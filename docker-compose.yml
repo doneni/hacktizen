@@ -1,0 +1,98 @@
+version: '3.8'
+
+services:
+  proxy:
+    image: traefik:v2.9
+    networks:
+      - ${TRAEFIK_PUBLIC_NETWORK?Variable not set}
+      - default
+    ports:
+      - "80:80"
+      - "8090:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command:
+      # Enable Docker in Traefik, so that it reads labels from Docker services
+      - --providers.docker
+      # Do not expose all Docker services, only the ones explicitly exposed
+      - --providers.docker.exposedbydefault=false
+      # Disable Docker Swarm mode for local development
+      # - --providers.docker.swarmmode
+      # Enable the access log, with HTTP requests
+      - --accesslog
+      # Enable the Traefik log, for configurations and errors
+      - --log
+      # Enable the Dashboard and API
+      - --api
+      # Enable the Dashboard and API in insecure mode for local development
+      - --api.insecure=true
+      - --entrypoints.web.address=:80
+    labels:
+      # Enable Traefik for this service, to make it available in the public network
+      traefik.enable: true
+      # Use the traefik-public network (declared below)
+      traefik.docker.network: ${TRAEFIK_PUBLIC_NETWORK?Variable not set}
+
+  db:
+    image: mongo:latest
+    volumes:
+      - app-db-data:/data/db
+    env_file:
+      - .env
+    ports:
+      - "${MONGO_PORT}:${MONGO_PORT}"
+    environment:
+      - "MONGO_INITDB_DATABASE=${MONGO_DB}"
+      - "MONGO_INITDB_ROOT_USERNAME=${MONGO_USER}"
+      - "MONGO_INITDB_ROOT_PASSWORD=${MONGO_PASSWORD}"
+
+  backend:
+    image: '${DOCKER_IMAGE_BACKEND?Variable not set}:${TAG-latest}'
+    depends_on:
+      - db
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app
+    ports:
+      - "8888:8888"
+    environment:
+      - SERVER_HOST=http://${DOMAIN?Variable not set}
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        INSTALL_DEV: ${INSTALL_DEV-true}
+    command: /start-reload.sh
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.${STACK_NAME?Variable not set}-backend-http.rule=PathPrefix(`/api`) || PathPrefix(`/docs`) || PathPrefix(`/redoc`)
+      - traefik.http.services.${STACK_NAME?Variable not set}-backend.loadbalancer.server.port=80
+
+  frontend:
+    image: '${DOCKER_IMAGE_FRONTEND?Variable not set}:${TAG-latest}'
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.development
+      args:
+        FRONTEND_ENV: dev
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app # Synchronise docker container with local change
+      - /app/node_modules # Avoid re-copying local node_modules. Cache in volume. See https://stackoverflow.com/questions/29181032/add-a-volume-to-docker-but-exclude-a-sub-folder
+    env_file:
+      - .env
+    command: npm run dev -- --host
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.${STACK_NAME?Variable not set}-frontend-http.rule=PathPrefix(`/`)
+      - traefik.http.services.${STACK_NAME?Variable not set}-frontend.loadbalancer.server.port=5173
+
+volumes:
+  app-db-data:
+
+networks:
+  traefik-public:
+    # For local dev, don't expect an external Traefik network
+    external: false
